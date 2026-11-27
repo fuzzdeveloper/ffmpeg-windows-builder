@@ -8,11 +8,15 @@ ROOT=${ROOT:-$HERE/work}
 TARGET=x86_64-w64-mingw32
 JOBS=${JOBS:-$(nproc)}
 MODE=build
+PROFILE=full
+SHARED=0
 REBUILD=0
 ONLY=ffmpeg
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: windows-build/build.sh [--check|--list|--fetch-only|--deps-only] [--rebuild] [--only NAME[,NAME...]]' \
+    printf '%s\n' 'Usage: windows-build/build.sh [--check|--list|--fetch-only|--deps-only] [--minimal] [--shared] [--rebuild] [--only NAME[,NAME...]]' \
+        '  --minimal    Build the cut-down GPLv2-compatible build (ffmpeg+ffprobe only).' \
+        '  --shared     Build FFmpeg libraries as shared DLLs (default: static).' \
         '  --rebuild    Rebuild selected recipes even if already installed.' \
         'Environment: ROOT, JOBS, FFMPEG_SOURCE, MINGW_CC, MINGW_CXX, CUDA_CLANG.'
 }
@@ -22,6 +26,8 @@ while (($#)); do
         --list) MODE=list ;;
         --fetch-only) MODE=fetch ;;
         --deps-only) MODE=deps ;;
+        --minimal) PROFILE=minimal ;;
+        --shared) SHARED=1 ;;
         --rebuild|--force) REBUILD=1 ;;
         --only) shift; (($#)) || fail '--only needs a name'; ONLY=$1 ;;
         -h|--help) usage; exit 0 ;;
@@ -30,6 +36,8 @@ while (($#)); do
     shift
 done
 [[ $JOBS =~ ^[1-9][0-9]*$ ]] || fail 'JOBS must be a positive integer'
+if [[ $SHARED == 1 ]]; then BUILD_TYPE=shared; else BUILD_TYPE=static; fi
+CONFIG_TAG=$PROFILE-$BUILD_TYPE
 ROOT=$(realpath -m "$ROOT")
 PREFIX=$ROOT/prefix
 HOST_PREFIX=$ROOT/host
@@ -56,6 +64,9 @@ tarball fontconfig https://www.freedesktop.org/software/fontconfig/release/fontc
 gh ass libass/libass 0.17.3 'freetype harfbuzz fribidi fontconfig'
 gh xml2 GNOME/libxml2 v2.12.10 'zlib iconv'
 tarball bluray https://download.videolan.org/pub/videolan/libbluray/1.3.4/libbluray-1.3.4.tar.bz2 1.3.4 'xml2 freetype fontconfig'
+tarball dvdcss https://download.videolan.org/pub/videolan/libdvdcss/1.6.0/libdvdcss-1.6.0.tar.xz 1.6.0
+tarball dvdread https://download.videolan.org/pub/videolan/libdvdread/7.1.1/libdvdread-7.1.1.tar.xz 7.1.1 dvdcss
+tarball dvdnav https://download.videolan.org/pub/videolan/libdvdnav/7.0.0/libdvdnav-7.0.0.tar.xz 7.0.0 dvdread
 tarball bs2b https://downloads.sourceforge.net/project/bs2b/libbs2b/3.1.0/libbs2b-3.1.0.tar.gz 3.1.0
 gh flite festvox/flite v2.2
 gh gme libgme/game-music-emu 0.6.3 zlib
@@ -100,7 +111,7 @@ register aom git https://aomedia.googlesource.com/aom v3.12.1 ''
 gh vpx webmproject/libvpx v1.15.0
 gh nvcodec FFmpeg/nv-codec-headers n12.2.72.0
 gh amf GPUOpen-LibrariesAndSDKs/AMF v1.5.3
-gh mfx lu-zero/mfx_dispatch 1.35.1
+gh vpl intel/libvpl v2.17.0
 gh aribcaption xqq/libaribcaption v1.1.1 'freetype fontconfig'
 gh aribb24 nkoriyama/aribb24 v1.0.3 png
 gh frei0r dyne/frei0r v2.3.3
@@ -117,16 +128,35 @@ gh xavs2 pkuvcl/xavs2 1.4
 register xavs svn https://svn.code.sf.net/p/xavs/code/trunk HEAD ''
 gh caca cacalabs/libcaca v0.99.beta20
 gh sdl2 libsdl-org/SDL release-2.32.10
-ALL_DEPS="${ORDER[*]}"
+# The minimal profile only needs the AviSynth headers plus the requested codecs.
+if [[ $PROFILE == minimal ]]; then
+    ALL_DEPS="avisynth x264 x265 vpx opus ogg vorbis"
+else
+    ALL_DEPS="${ORDER[*]}"
+fi
 register ffmpeg local "$FFMPEG_SOURCE" current "$ALL_DEPS"
 # The user's full configuration is embedded here; no external flag script is read.
+if [[ $PROFILE == minimal ]]; then
+    # GPLv2+ build: no --enable-version3, no --enable-nonfree, no libfdk_aac.
+    FFMPEG_FLAGS=(
+        --pkg-config=pkg-config --pkg-config-flags=--static
+        --disable-debug --disable-doc --disable-w32threads --disable-autodetect
+        --disable-ffplay --disable-avdevice
+        --arch=x86_64 --target-os=mingw32 --cross-prefix=x86_64-w64-mingw32-
+        --enable-gpl
+        --enable-avisynth
+        --enable-libx264 --enable-libx265 --enable-libvpx
+        --enable-libopus --enable-libvorbis
+        --extra-cflags=-mtune=generic --extra-cflags=-O3
+    )
+else
 FFMPEG_FLAGS=(
     --pkg-config=pkg-config --pkg-config-flags=--static
     --enable-version3 --disable-debug --disable-w32threads
     --enable-sdl2 --enable-ffplay
     --arch=x86_64 --target-os=mingw32 --cross-prefix=x86_64-w64-mingw32-
     --enable-libcaca --enable-gray --enable-libtesseract --enable-fontconfig
-    --enable-gmp --enable-libass --enable-libbluray --enable-libbs2b
+    --enable-gmp --enable-libass --enable-libbluray --enable-libdvdread --enable-libdvdnav --enable-libbs2b
     --enable-libflite --enable-libfreetype --enable-libfribidi --enable-libgme
     --enable-libgsm --enable-libilbc --enable-libmodplug --enable-libmp3lame
     --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libopus
@@ -140,14 +170,20 @@ FFMPEG_FLAGS=(
     --extra-libs=-lmpg123 --extra-libs=-lpthread
     --extra-cflags=-DLIBTWOLAME_STATIC --extra-cflags=-DMODPLUG_STATIC
     --extra-cflags=-DCACA_STATIC
-    --enable-amf --enable-libmfx --enable-libaribcaption
+    --enable-amf --enable-libvpl --enable-libaribcaption
     --enable-gpl --enable-nonfree --enable-frei0r --enable-librubberband
     --enable-libvidstab --enable-libx264 --enable-libx265 --enable-libfdk-aac
     --enable-avisynth --enable-libaribb24 --enable-libxvid
     --enable-libdavs2 --enable-libxavs2 --enable-libxavs
     --extra-cflags=-mtune=generic --extra-cflags=-O3
-    --enable-static --disable-shared
 )
+fi
+# Library linkage is independent of the minimal/full feature profile.
+if [[ $SHARED == 1 ]]; then
+    FFMPEG_FLAGS+=(--enable-shared --disable-static)
+else
+    FFMPEG_FLAGS+=(--enable-static --disable-shared)
+fi
 select_recipe() {
     local n=$1 d
     [[ ${KIND[$n]+yes} ]] || fail "Unknown recipe: $n (see --list)"
@@ -183,7 +219,7 @@ preflight() {
     done
     if [[ ${SELECTED[xavs]:-} ]]; then command -v svn >/dev/null || missing+=(svn); fi
     if [[ ${SELECTED[fontconfig]:-} || ${SELECTED[caca]:-} ]]; then command -v gperf >/dev/null || missing+=(gperf); fi
-    if [[ ${SELECTED[ffmpeg]:-} ]]; then command -v "$CUDA_CLANG" >/dev/null || missing+=("$CUDA_CLANG"); fi
+    if [[ ${SELECTED[ffmpeg]:-} && $PROFILE == full ]]; then command -v "$CUDA_CLANG" >/dev/null || missing+=("$CUDA_CLANG"); fi
     ((${#missing[@]} == 0)) || fail "Missing host tools: ${missing[*]}. See windows-build/README.md."
     [[ $($MINGW_CC -dumpmachine) == "$TARGET" ]] || fail 'Wrong compiler target'
     [[ $($MINGW_CXX -dumpmachine) == "$TARGET" ]] || fail 'Wrong C++ compiler target'
@@ -197,9 +233,11 @@ preflight() {
     fi
     if [[ ${SELECTED[ffmpeg]:-} ]]; then
         [[ -x $FFMPEG_SOURCE/configure ]] || fail 'Missing FFmpeg configure'
-        printf '__attribute__((global)) void test(void) {}\n' > "$tmp/test.cu"
-        if ! "$CUDA_CLANG" -x cuda --cuda-device-only --cuda-gpu-arch=sm_30 -nocudainc -nocudalib -S "$tmp/test.cu" -o "$tmp/test.ptx"; then
-            rm -rf "$tmp"; fail 'Clang CUDA/PTX probe failed; install a Clang with the NVPTX backend or set CUDA_CLANG'
+        if [[ $PROFILE == full ]]; then
+            printf '__attribute__((global)) void test(void) {}\n' > "$tmp/test.cu"
+            if ! "$CUDA_CLANG" -x cuda --cuda-device-only --cuda-gpu-arch=sm_30 -nocudainc -nocudalib -S "$tmp/test.cu" -o "$tmp/test.ptx"; then
+                rm -rf "$tmp"; fail 'Clang CUDA/PTX probe failed; install a Clang with the NVPTX backend or set CUDA_CLANG'
+            fi
         fi
     fi
     rm -rf "$tmp"
@@ -382,6 +420,9 @@ recipe() {
                 --redefine-sym dec_open_stream=bluray_dec_open_stream \
                 "$PREFIX/lib/libbluray.a"
             ;;
+        dvdcss) ms . -Denable_docs=false -Denable_examples=false ;;
+        dvdread) ms . -Denable_docs=false -Dlibdvdcss=enabled ;;
+        dvdnav) ms . -Denable_docs=false -Denable_examples=false ;;
         bs2b)
             cd "$WORK"
             # Ancient AC_FUNC_MALLOC misdetects cross malloc and substitutes rpl_malloc.
@@ -522,7 +563,11 @@ PY
             mkdir -p "$PREFIX/include/AMF"
             cp -a "$WORK/amf/public/include/." "$PREFIX/include/AMF/"
             ;;
-        mfx) auto . ;;
+        vpl)
+            # libvpl's pkg-config file omits the C++ runtime; add it so FFmpeg's
+            # configure link test succeeds with a static libvpl.
+            cm . -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF -DINSTALL_EXAMPLES=OFF -DCXX_LIB='-lstdc++ -lpthread'
+            ;;
         aribcaption) cm . -DARIBCC_BUILD_TESTS=OFF ;;
         frei0r) cm . -DWITHOUT_OPENCV=ON ;;
         rubberband) ms . -Dfft=builtin -Dresampler=builtin -Dtests=disabled -Dcmdline=disabled -Dladspa=disabled -Dlv2=disabled -Dvamp=disabled ;;
@@ -607,13 +652,22 @@ PY
 build_ffmpeg() {
     # FFmpeg forbids an out-of-tree build when its source tree contains config.h.
     [[ ! -e $FFMPEG_SOURCE/config.h ]] || fail "Source tree is configured. Run 'make distclean' in $FFMPEG_SOURCE first (this builder will not clean your checkout)."
+    # OUT holds only FFmpeg's own install tree; remove stale artifacts so a
+    # static build cannot leave old DLLs (or vice versa) next to the new output.
+    rm -rf "${OUT:?}"/{bin,lib,include,share}
+    mkdir -p "$OUT"/{bin,lib,include,share}
     cd "$WORK"
-    "$FFMPEG_SOURCE/configure" "${FFMPEG_FLAGS[@]}" \
-        --enable-cross-compile --cc="$CC" --cxx="$CXX" \
-        --nvcc="$CUDA_CLANG" --glslc="$HOST_PREFIX/bin/glslang" \
-        --prefix="$OUT" --extra-cflags="-I$PREFIX/include -DOPJ_STATIC -DLIBXML_STATIC -DARIBCC_STATIC" \
-        --extra-ldflags="-L$PREFIX/lib -static" \
-        --extra-libs='-Wl,--start-group -lharfbuzz -lmpg123 -lstdc++ -lpthread -Wl,--end-group'
+    local -a extra=(--enable-cross-compile --cc="$CC" --cxx="$CXX"
+        --prefix="$OUT" --extra-ldflags="-L$PREFIX/lib -static")
+    if [[ $PROFILE == minimal ]]; then
+        extra+=(--extra-cflags="-I$PREFIX/include"
+            --extra-libs='-lstdc++ -lpthread')
+    else
+        extra+=(--nvcc="$CUDA_CLANG" --glslc="$HOST_PREFIX/bin/glslang"
+            --extra-cflags="-I$PREFIX/include -DOPJ_STATIC -DLIBXML_STATIC -DARIBCC_STATIC"
+            --extra-libs='-Wl,--start-group -lharfbuzz -lmpg123 -lstdc++ -lpthread -Wl,--end-group')
+    fi
+    "$FFMPEG_SOURCE/configure" "${FFMPEG_FLAGS[@]}" "${extra[@]}"
     # Explicit --enable options must not be silently dropped.
     python3 - ffbuild/config.mak "${FFMPEG_FLAGS[@]}" <<'PY'
 import re, sys
@@ -651,15 +705,19 @@ run_recipe() {
     # source change must not redo hours of dependency work. Use --rebuild to
     # deliberately discard stamps and rebuild the selected recipes.
     if [[ $MODE != fetch && $REBUILD == 0 && -f $ROOT/stamps/$n ]]; then
-        printf 'Already installed: %s (use --rebuild to force).\n' "$n"
-        return 0
+        if [[ $n == ffmpeg && $(cat "$ROOT/stamps/ffmpeg-config" 2>/dev/null) != "$CONFIG_TAG" ]]; then
+            printf 'FFmpeg configuration changed (%s); rebuilding %s.\n' "$CONFIG_TAG" "$n"
+        else
+            printf 'Already installed: %s (use --rebuild to force).\n' "$n"
+            return 0
+        fi
     fi
     printf '\n=== %s (%s) ===\n' "$n" "${REF[$n]}"
     fetch "$n" > >(tee "$ROOT/logs/$n-fetch.log") 2>&1
     [[ $MODE != fetch ]] || return 0
     if [[ $REBUILD == 1 ]]; then rm -f "$ROOT/stamps/$n"; fi
     signature=$({
-        printf '%s\n' "$BASE_HASH"
+        printf '%s\n' "$BASE_HASH" "$PROFILE" "$SHARED"
         if [[ $n == ffmpeg ]]; then
             git -C "$FFMPEG_SOURCE" rev-parse HEAD
             git -C "$FFMPEG_SOURCE" diff --binary HEAD
@@ -688,6 +746,7 @@ run_recipe() {
         fail "$n failed. Full log: $ROOT/logs/$n.log"
     fi
     printf '%s\n' "$signature" > "$ROOT/stamps/$n"
+    [[ $n != ffmpeg ]] || printf '%s\n' "$CONFIG_TAG" > "$ROOT/stamps/ffmpeg-config"
     printf 'Installed. Log: %s/logs/%s.log\n' "$ROOT" "$n"
 }
 # Recipes run as background subshells and are waited on separately: wrapping
@@ -700,4 +759,10 @@ if [[ $MODE == build && -f $ROOT/stamps/ffmpeg ]]; then
     for exe in ffmpeg ffplay ffprobe; do
         [[ ! -f $OUT/bin/$exe.exe ]] || printf '  %s\n' "$OUT/bin/$exe.exe"
     done
+    if [[ $SHARED == 1 ]]; then
+        printf 'Shared FFmpeg libraries:\n'
+        for dll in "$OUT"/bin/*.dll; do
+            [[ ! -f $dll ]] || printf '  %s\n' "$dll"
+        done
+    fi
 fi

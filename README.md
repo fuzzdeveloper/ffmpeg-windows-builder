@@ -24,6 +24,50 @@ git clone https://github.com/fuzzdeveloper/ffmpeg-windows-builder.git
 JOBS=8 ./ffmpeg-windows-builder/build.sh
 ```
 
+### Static vs shared FFmpeg libraries
+
+By default FFmpeg's own libraries are linked statically into the executables.
+Pass `--shared` to build them as DLLs (`avcodec-*.dll`, `avformat-*.dll`, etc.)
+instead. External codec libraries are always linked statically. `--shared` is
+independent of `--minimal`, so there are four possible builds:
+
+| Command | Feature set | FFmpeg libraries |
+| --- | --- | --- |
+| `build.sh` | full | static |
+| `build.sh --shared` | full | shared DLLs |
+| `build.sh --minimal` | minimal | static |
+| `build.sh --minimal --shared` | minimal | shared DLLs |
+
+Switching between static and shared (or between profiles) automatically rebuilds
+FFmpeg; the external dependencies are reused. Stale artifacts in `work/output`
+are removed before the FFmpeg install so the two variants do not mix. Shipped
+shared builds need the matching `av*-*.dll` files next to the executables.
+
+### Cut-down GPLv2 build
+
+For a smaller, GPLv2-compatible build, pass `--minimal`:
+
+```sh
+JOBS=8 ./ffmpeg-windows-builder/build.sh --minimal
+```
+
+This profile builds only `ffmpeg.exe` and `ffprobe.exe`. Add `--shared` to build
+FFmpeg's own libraries as DLLs that the two executables share (copy the
+executables together with `av*-*.dll` from `work/output/bin`). It includes:
+
+- AviSynth(+) input (`--enable-avisynth`)
+- H.264 via libx264, HEVC via libx265, VP8/VP9 via libvpx
+- AAC via FFmpeg's built-in encoder, Opus via libopus, Vorbis via libvorbis
+
+It deliberately does **not** use `--enable-version3`, `--enable-nonfree`, or
+`--enable-libfdk-aac`. It also omits the Apache-2.0/LGPLv3 dependencies (e.g.
+OpenCORE AMR, Tesseract, GMP, libaribb24) that are incompatible with GPLv2.
+
+Static linking remains the default for every profile: a plain `--minimal` build
+produces self-contained executables, while `--minimal --shared` produces
+executables plus the `av*-*.dll` files. `--minimal` only changes the FFmpeg
+dependency set and feature flags, not the library linkage.
+
 ## Host prerequisites (Debian/Ubuntu)
 
 On a recent Debian/Ubuntu Linux host, copy and paste this single line to install
@@ -76,6 +120,7 @@ Expect many hours of compilation and tens of GB of free disk space. Reduce
 Outputs (default):
 
 - `windows-build/work/output/bin/ffmpeg.exe`, `ffplay.exe`, and `ffprobe.exe`
+- with `--shared`, the FFmpeg DLLs in `windows-build/work/output/bin/`
 - `windows-build/work/prefix/`: target headers, static libraries and `.pc` files
 - `windows-build/work/host/`: native build tools (currently glslang)
 - `windows-build/work/logs/NAME.log`: each dependency's full build log
@@ -130,7 +175,9 @@ Build stamps record the builder, local patches, compiler versions, prefix,
 source locks, and prerequisite stamps. A non-empty `work/stamps/NAME` is treated
 as **already installed** and is skipped even if those inputs changed; this avoids
 rebuilding hours of dependencies after a small script edit. Pass `--rebuild` to
-ignore the stamps for the selected recipes (and their prerequisites). To make a
+ignore the stamps for the selected recipes (and their prerequisites). The FFmpeg
+stamp also records the profile/linkage configuration, so changing `--minimal` or
+`--shared` rebuilds FFmpeg without touching the dependencies. To make a
 single recipe eligible again without forcing its dependencies, remove
 `work/stamps/NAME`. To change a source version, edit its registration and use a
 new `ROOT` (or remove `work/sources/NAME` and `work/downloads/NAME.tar`), because
@@ -142,16 +189,27 @@ prefix: `.pc` files and build systems contain absolute paths.
 I haven't performed extensive testing of the resulting ffmpeg build but it seems
 to work fine for making h264/aac mp4's.
 
-The feature set includes deprecated `libmfx` and legacy XAVS/DAVS2/XAVS2/Xvid/ZVBI
-libraries. `libmfx` is deliberately retained rather than replaced with libvpl;
-FFmpeg may emit a deprecation warning. ZVBI and Flite use pinned releases plus
-compatibility patches. Tesseract requires trained language data on the runtime
-machine; this builder only builds the library.
+The feature set includes modern Intel oneVPL (`libvpl`), DVD-Video
+(`libdvdread`/`libdvdnav`/`libdvdcss`), and legacy XAVS/DAVS2/XAVS2/Xvid/ZVBI
+libraries. `libdvdcss` is included so CSS-encrypted commercial DVDs can be
+decrypted; review the relevant local laws before distributing it. ZVBI and Flite
+use pinned releases plus compatibility patches. Tesseract requires trained
+language data on the runtime machine; this builder only builds the library.
 
-**Licensing:** the requested `--enable-gpl --enable-version3 --enable-nonfree`
-combination (in particular FDK-AAC) produces an FFmpeg binary that FFmpeg labels
-nonredistributable. Do not treat its output as a distributable GPL binary.
-Review dependency/plugin licenses separately.
+**Licensing:** the default full profile requests `--enable-gpl --enable-version3
+--enable-nonfree` (in particular FDK-AAC), which produces an FFmpeg binary that
+FFmpeg labels nonredistributable. Do not treat its output as a distributable
+GPL binary. Review dependency/plugin licenses separately.
+
+The `--minimal` profile is intended for GPLv2 distribution: it uses `--enable-gpl`
+without `--enable-version3` or `--enable-nonfree`, so FFmpeg is GPLv2-or-later.
+libx264, libx265, and AviSynth are GPLv2-compatible; libvpx, libopus, and
+libvorbis are BSD-licensed; the native AAC encoder is LGPLv2.1+. No FDK-AAC is
+included. You still have to comply with the GPL when distributing the binaries
+(including providing the corresponding source for FFmpeg, libx264 and libx265).
+The GPL-3.0-or-later licence of this build script itself does not change the
+licence of the binaries it produces; keep the script as a separate build tool and
+do not relicense it as GPLv2 if you redistribute it.
 
 ## Patch provenance
 
